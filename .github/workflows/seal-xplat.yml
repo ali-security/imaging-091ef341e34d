@@ -1,0 +1,119 @@
+name: seal-xplat
+
+on:
+  workflow_dispatch:
+
+jobs:
+  module-zip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: Build module zip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 1. Staging copy of the checkout WITHOUT .git, .github and .gitignore.
+          #    Go module zips do include .github/** and .gitignore, so this added
+          #    workflow file and the harness-injected .gitignore must be kept out
+          #    of the zipped tree or the artifact will not match the public zip.
+          rm -rf /tmp/zipsrc
+          mkdir -p /tmp/zipsrc
+          tar -c --exclude=.git --exclude=.github --exclude=.gitignore -C "${GITHUB_WORKSPACE}" . | tar -x -C /tmp/zipsrc
+
+          # Fail closed: excluded paths absent, module root present.
+          test ! -e /tmp/zipsrc/.git
+          test ! -e /tmp/zipsrc/.github
+          test ! -e /tmp/zipsrc/.gitignore
+          test -f /tmp/zipsrc/go.mod
+
+          # 2. The x/mod helper module lives OUTSIDE the repo, so Go resolves the
+          #    helper's own go.mod instead of the library's (running it inside the
+          #    tree would add golang.org/x/mod to the library's go.mod). Module
+          #    path + version only; never `go mod tidy`, which upgrades the pin.
+          rm -rf /tmp/helper
+          mkdir -p /tmp/helper
+          cd /tmp/helper
+          go mod init helper
+          go get golang.org/x/mod@v0.24.0
+
+          # 3. zip.CreateFromDir applies the module proxy's own inclusion rules
+          #    (drops .git/, vendor/, nested modules) so the file set matches by
+          #    construction.
+          cat > /tmp/helper/create_mod.go <<'EOF'
+          package main
+
+          import (
+              "log"
+              "os"
+
+              "golang.org/x/mod/module"
+              "golang.org/x/mod/zip"
+          )
+
+          func main() {
+              if len(os.Args) != 5 {
+                  log.Fatal("usage: go run . <module-path> <version> <source-dir> <output-zip>")
+              }
+              m := module.Version{Path: os.Args[1], Version: os.Args[2]}
+              f, err := os.Create(os.Args[4])
+              if err != nil {
+                  log.Fatal(err)
+              }
+              defer f.Close()
+              if err := zip.CreateFromDir(f, m, os.Args[3]); err != nil {
+                  log.Fatal(err)
+              }
+              log.Printf("created module zip: %s", os.Args[4])
+          }
+          EOF
+
+          # The output zip is written OUTSIDE the source dir: creating it inside
+          # /tmp/zipsrc would make CreateFromDir walk the zip into itself.
+          go run . github.com/disintegration/imaging v1.6.1 /tmp/zipsrc /tmp/v1.6.1.zip
+
+          # 4. Fail closed on the public entry count: 27 root files + 34 testdata.
+          unzip -Z1 /tmp/v1.6.1.zip
+          COUNT="$(unzip -Z1 /tmp/v1.6.1.zip | wc -l)"
+          echo "module zip entry count: ${COUNT}"
+          test "${COUNT}" -eq 61
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: /tmp/v1.6.1.zip
+          if-no-files-found: error
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: Build and test
+        shell: bash
+        run: |
+          go build ./...
+          go test -v -cover ./...
+
+      # Upstream .travis.yml ran `go test -race -cover ./...`. The race detector
+      # needs a C toolchain, so keep that leg on Linux only.
+      - name: Race tests
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          go test -v -race -cover ./...
