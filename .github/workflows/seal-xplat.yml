@@ -78,11 +78,13 @@ jobs:
           # /tmp/zipsrc would make CreateFromDir walk the zip into itself.
           go run . github.com/disintegration/imaging v1.6.1 /tmp/zipsrc /tmp/v1.6.1.zip
 
-          # 4. Fail closed on the public entry count: 27 root files + 34 testdata.
+          # 4. Fail closed on the entry count: 27 root files + 34 public testdata
+          #    files + testdata/CVE-2023-36308.tiff added by the CVE-2023-36308
+          #    regression test.
           unzip -Z1 /tmp/v1.6.1.zip
           COUNT="$(unzip -Z1 /tmp/v1.6.1.zip | wc -l)"
           echo "module zip entry count: ${COUNT}"
-          test "${COUNT}" -eq 61
+          test "${COUNT}" -eq 62
 
       - uses: actions/upload-artifact@v4
         with:
